@@ -1,0 +1,10 @@
+#!/bin/sh
+# Refuse any commit that would introduce credentials, real IP addresses,
+# internal hostnames, or captured runs. Install with: scripts/install-hooks.sh
+root="$(git rev-parse --show-toplevel)"
+python3 "$root/scripts/scan_secrets.py" --staged || {
+  echo ""
+  echo "commit blocked by the secret scan (see above)."
+  echo "override for one commit only if you are certain: git commit --no-verify"
+  exit 1
+}

@@ -1,0 +1,17 @@
+# Captured runs contain real prompts and completions — never commit these.
+runs/
+
+# Local, private configuration (your Ollama host lives here).
+tracer.local.json
+*.local.json
+.env
+.env.*
+
+# Local scanner denylist — holds your internal names, must stay untracked.
+.secretscan-denylist
+
+# Junk
+__pycache__/
+*.pyc
+.DS_Store
+shots/
