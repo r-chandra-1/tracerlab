@@ -66,6 +66,10 @@ counts and arrival timestamps).
 | **Runs tab** | Run history; tick 2+ runs for an A/B table with the best value per metric highlighted, plus tok/s variance across the selection |
 | **JSON tab** | Exact request body, response headers, and the final computed summary |
 
+Hover anything — a metric tile, a waterfall segment, a chart, a parameter — for what it
+measures and what to conclude from it. Your prompt, parameters, host and model are saved
+to the browser as you type and restored on reload; **Reset saved settings** clears them.
+
 ## Notes on the numbers
 
 - **TTFT** is measured from the moment `server.py` starts the request to the first frame

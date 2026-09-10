@@ -99,6 +99,15 @@ main{flex:1;display:grid;grid-template-columns:300px minmax(0,1fr) 380px;gap:8px
 .hostpill select{border:0;background:none;padding:4px 4px;min-width:140px;font:11px/1 var(--mono);color:var(--fg)}
 .hostpill select:focus{box-shadow:none}
 
+[data-help]{cursor:help}
+#helptip{position:fixed;z-index:100;pointer-events:none;display:none;max-width:380px;
+  background:#0d1421f7;border:1px solid var(--line2);border-radius:8px;padding:9px 11px;
+  box-shadow:0 12px 34px #000b;font:11px/1.55 var(--sans);color:var(--fg)}
+#helptip .ht{font:11px/1.3 var(--mono);color:var(--cyan);letter-spacing:.4px;margin-bottom:5px}
+#helptip .hw{color:var(--fg)}
+#helptip .hi{color:var(--fg2);margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}
+#helptip .hi b{color:var(--amber);font-weight:600}
+
 .legendbar{display:flex;align-items:center;gap:8px;font:10px/1 var(--mono);color:var(--fg3)}
 .grad{height:9px;width:110px;border-radius:3px;border:1px solid var(--line2)}
 
@@ -261,6 +270,7 @@ pre{margin:0;font:10.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-a
           </div>
         </div>
         <button id="unload" style="width:100%;margin-top:4px">Unload model from VRAM</button>
+        <button id="resetsettings" style="width:100%;margin-top:6px">Reset saved settings</button>
       </div>
     </div>
 
@@ -390,6 +400,7 @@ pre{margin:0;font:10.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-a
 </main>
 </div>
 <div id="tip"></div>
+<div id="helptip"></div>
 
 <script>
 "use strict";
@@ -694,7 +705,7 @@ const TILE_DEFS = [
 ];
 function buildTiles(){
   $('#tiles').innerHTML = TILE_DEFS.map(t=>
-    `<div class="tile ${t.cls} ${t.spark?'spark':''}" id="tile-${t.id}">
+    `<div class="tile ${t.cls} ${t.spark?'spark':''}" id="tile-${t.id}" data-help="${t.id}">
        <div class="lab">${t.lab}</div><div class="val" id="v-${t.id}">—</div>
        <div class="sub" id="s-${t.id}"></div>${t.spark?'<canvas height="20" id="sp-'+t.id+'"></canvas>':''}
      </div>`).join('');
@@ -806,7 +817,7 @@ function drawWaterfall(){
   const max = Math.max(end, 1);
   let html = rows.map(r=>{
     const l = r.from/max*100, wd = Math.max(0.4,(r.to-r.from)/max*100);
-    return `<div class="wfrow"><div class="nm">${r.name}</div>
+    return `<div class="wfrow" data-help="wf:${r.name}"><div class="nm">${r.name}</div>
       <div class="wftrack"><div class="wfbar" style="left:${l}%;width:${wd}%;background:${r.color}"></div></div>
       <div class="vv">${ms(r.to-r.from)}</div></div>`;
   }).join('');
@@ -821,7 +832,7 @@ function drawWaterfall(){
     for(const [nm,val,c] of [['load model',load,PAL.violet],['prompt eval',pe,PAL.blue],
                              ['generation',ev,PAL.cyan],['engine other',other,PAL.amber]]){
       const l=acc/tot*100, wd=Math.max(0.4,val/tot*100); acc+=val;
-      html += `<div class="wfrow"><div class="nm">${nm}</div>
+      html += `<div class="wfrow" data-help="wf:${nm}"><div class="nm">${nm}</div>
         <div class="wftrack"><div class="wfbar" style="left:${l}%;width:${wd}%;background:${c}"></div></div>
         <div class="vv">${ms(val)}</div></div>`;
     }
@@ -1227,7 +1238,7 @@ function resetRun(){
   tpsHistory=[]; S.show=S.show; $('#thinkwrap').style.display='none';
   $('#reqjson').textContent='—'; $('#reshdr').textContent='—'; $('#finjson').textContent='—';
   $('#metricnote').textContent='';
-  buildTiles();
+  buildTiles(); wireHelp();
 }
 function collectOptions(){
   const o = {};
@@ -1330,6 +1341,228 @@ function handleEvent(ev){
   }
 }
 
+
+/* ===================== hover help =====================
+   [title, what it is, what to infer]. Attached at runtime so the markup stays clean. */
+const HELP = {
+  /* --- metric tiles --- */
+  ttft:   ['TTFT · time to first token',
+           'Request start → the first token of any kind, thinking included. Covers queueing, model load and prompt prefill.',
+           'The number a user actually feels. If it is large but <b>model load</b> is ~0, the cost is prefill — shorten the prompt. On a reasoning model check the sub-line: content can arrive seconds after the first token.'],
+  tps:    ['tok/s (wall)',
+           'Decode steps divided by wall-clock generation time, measured at the socket by the proxy.',
+           'The honest cross-runtime number — it needs no cooperation from the engine, so it is the one to use when comparing MLX against llama.cpp, or two machines.'],
+  evrate: ['eval rate',
+           "Ollama's own eval_count ÷ eval_duration. Pure decode, no network.",
+           'Memory-bandwidth-bound. Quote this when comparing quantizations on one machine. If it reads "unusable", that runner reported a ~0ms timer and the number would have been fiction.'],
+  perate: ['prompt eval rate',
+           'Prefill throughput: prompt tokens ÷ prefill time.',
+           'Compute-bound, unlike decode. This sets how long a big context costs you — at 130 tok/s an 8K prompt is ~60s before the first token. Collapses when a model spills to CPU.'],
+  ntok:   ['content tokens',
+           'Tokens the user actually sees, excluding chain-of-thought.',
+           'Zero here with a large thinking count means the model deliberated and never answered — check finish reason for <b>length</b>.'],
+  think:  ['thinking tokens',
+           'Decode steps emitted as message.thinking — reasoning hidden from the final answer.',
+           'These cost full price in time and context. If they dominate, either raise num_predict or set thinking to <b>off</b> in the param lab.'],
+  ptok:   ['prompt tokens',
+           'Tokens the server actually charged for your prompt (engine-reported).',
+           'Compare with the ≈ estimate next to the prompt box. Consistently higher means your text tokenizes badly — common with code and non-English.'],
+  load:   ['model load',
+           'Time to bring the model into memory before any work starts.',
+           'Big on the first call, ~0 when warm. Large on <i>every</i> call means keep_alive expired or something evicted the model — raise keep_alive.'],
+  total:  ['total duration',
+           "The engine's own view of the whole request, in nanoseconds.",
+           'Compare against wall time: the difference is transport. If they diverge a lot, the network is the problem, not the model.'],
+  p50:    ['ITL p50',
+           'Median gap between consecutive decode steps.',
+           'The steady rhythm. Roughly 1000 ÷ p50 = sustained tok/s — a useful cross-check on the throughput tile.'],
+  p95:    ['ITL p95',
+           '95th percentile inter-token gap.',
+           'Where stutter lives. A p95 many times the p50 means something else is competing for the machine, or the scheduler is batching you against other work.'],
+  jitter: ['ITL stdev',
+           'Standard deviation of inter-token latency.',
+           'The best single "is this healthy" number. ~1ms is metronomic; tens of ms feels janky even when average throughput looks fine. CPU-only hosts and the MLX runner both sit high here.'],
+  frames: ['wire frames',
+           'Stream frames received from the server.',
+           'Compare with engine eval_count: more frames than tokens means keepalives, fewer means the server coalesced tokens into bursts (which reads as stuttering).'],
+  wire:   ['wire bytes',
+           'Total bytes streamed for this response.',
+           'Mostly JSON envelope. Matters if you ever stream this to a phone or over a slow link.'],
+  bpt:    ['bytes / token',
+           'Wire bytes ÷ decode steps.',
+           '~60 B/token normally, ~500 B/token with logprobs on. If throughput matters more than introspection, turn logprobs off — the serialisation is not free.'],
+  conf:   ['mean confidence',
+           'Average probability the model assigned to the token it actually chose.',
+           'A single fluency score. Long low-confidence stretches are where fabrication risk concentrates — find them in the certainty chart.'],
+  ent:    ['mean entropy',
+           'Average top-k entropy across the run, in bits.',
+           'How undecided the model was overall. Falls as you lower temperature; rises on ambiguous or out-of-distribution prompts. Truncated to top-k, so a lower bound.'],
+  over:   ['transport overhead',
+           'Wall-clock total minus the engine-reported total.',
+           'Network plus JSON serialisation. Should be small. Negative just means the engine timer disagrees with the clock — common on the MLX runner.'],
+  reason: ['finish reason',
+           'Why generation stopped: stop, length, or a stop sequence.',
+           '<b>length</b> means you hit num_predict and the answer is truncated mid-thought — the most common silent failure here. Raise num_predict or set it to -1.'],
+
+  /* --- waterfall segments --- */
+  'wf:tcp connect':        ['tcp connect', 'Time to open the TCP connection.', 'Isolates network from model cost. Tens of ms on a LAN is a DNS or routing problem, not a model problem.'],
+  'wf:req → headers':      ['request → headers', 'Request sent → response status line back.', "Queue admission. Large here means the server is busy with someone else's request and yours has not started."],
+  'wf:headers → 1st …':    ['headers → first byte', 'Headers received → first byte of the stream.', 'Where cold model load and prefill live. Usually the biggest single slice of TTFT.'],
+  'wf:1st byte → 1st…':    ['first byte → first token', 'First byte → first frame carrying real content.', 'Should be ~0. If not, the server is sending empty or keepalive frames before generating.'],
+  'wf:thinking':           ['thinking', 'Reasoning tokens, before any answer is shown.', 'Pure latency from the user\'s point of view. Set thinking to off if you want output rather than deliberation.'],
+  'wf:answer':             ['answer', 'From the first visible token to the end.', 'The part the user watches. Compare its width against thinking to see what you are paying for.'],
+  'wf:generation':         ['generation', 'First token to last token.', 'Pure decode wall time.'],
+  'wf:load model':         ['load model', 'Engine-reported time to load weights.', '~0 when warm. Consistently large means keep_alive is too short.'],
+  'wf:prompt eval':        ['prompt eval (prefill)', 'Engine-reported time processing your prompt.', 'Scales with prompt length and is compute-bound. This is what long system prompts and RAG context actually cost.'],
+  'wf:engine other':       ['engine other', 'Engine total minus load, prefill and decode.', 'Sampling, detokenisation and internal overhead. Should be a thin sliver.'],
+
+  /* --- charts --- */
+  c_tps:  ['throughput over time',
+           'Instantaneous tok/s over a 12-token sliding window, against the cumulative average.',
+           'A sagging instantaneous line as the run grows is KV-cache pressure. A gap between the two lines shows whether the run sped up or stalled after the start.'],
+  c_itl:  ['inter-token latency',
+           'One bar per decode step, coloured by latency, with p50/p95/p99 markers.',
+           'Isolated tall bars pinpoint exactly which token stalled — usually another request being admitted, or a cache resize. Even bars mean a healthy dedicated decode.'],
+  c_hist: ['latency histogram',
+           'Distribution of all inter-token gaps.',
+           'One tight peak is clean. Two peaks means two regimes — GPU vs CPU-offloaded layers, or swapping. A long right tail is the stutter you feel.'],
+  c_conf: ['model certainty',
+           'p(top-1) per step, top-k entropy on the right axis, and the p1−p2 margin as dots.',
+           'Entropy spikes are genuine branch points where sampling changed the output. A small margin means temperature and top_p actually mattered there; a flat high line means the model is coasting.'],
+  ctxbar: ['context budget',
+           'Prompt + output tokens against num_ctx.',
+           'Shows how close you are to truncation before it silently bites. Everything past num_ctx is dropped, oldest first.'],
+
+  /* --- parameters --- */
+  temperature:      ['temperature', 'Flattens or sharpens the probability distribution before sampling.', '0 is deterministic (always the argmax). Raise for variety, lower for code and factual work. Watch the certainty chart: at low temperature chosen rank should be 1 almost everywhere.'],
+  top_p:            ['top_p (nucleus)', 'Sample only from the smallest set of tokens whose probabilities sum to p.', 'Cuts the long tail of nonsense while leaving genuine alternatives. 0.9 is a sane default; 1.0 disables it.'],
+  top_k:            ['top_k', 'Consider only the k most likely tokens.', 'A blunter version of top_p. 0 disables it. Very low values make output repetitive.'],
+  min_p:            ['min_p', 'Drop tokens below this fraction of the top token\'s probability.', 'Adapts to how confident the model is, unlike top_k. Useful at high temperature to keep quality without killing variety.'],
+  repeat_penalty:   ['repeat_penalty', 'Divides the score of tokens that already appeared.', 'Above ~1.2 starts damaging code and prose that legitimately repeats (loops, boilerplate). 1.0 disables it.'],
+  repeat_last_n:    ['repeat_last_n', 'How far back the repeat penalty looks.', 'Larger windows suppress long-range repetition but can penalise legitimate structure.'],
+  presence_penalty: ['presence_penalty', 'Flat penalty for any token already used.', 'Pushes toward new topics. Mostly useful in open-ended chat, harmful in code.'],
+  frequency_penalty:['frequency_penalty', 'Penalty proportional to how often a token was used.', 'Suppresses verbal tics. Same caution as repeat_penalty for code.'],
+  num_ctx:          ['num_ctx', 'Context window the model is loaded with.', 'Bigger costs KV-cache memory whether or not you fill it. If the loaded context in the Model tab is smaller than what you asked for, the server clamped you.'],
+  num_predict:      ['num_predict', 'Maximum tokens to generate. -1 is unlimited.', 'If finish reason says length, this is what stopped you. On a reasoning model the chain of thought can consume the whole budget before the answer starts.'],
+  seed:             ['seed', 'Fixes the sampler\'s random draw.', 'Set it before comparing anything — without a seed, run-to-run variation will masquerade as a real difference.'],
+  keep_alive:       ['keep_alive', 'How long the model stays resident after a request.', 'If model load is large on every call, raise this. Set 0 to force an unload and measure cold-start cost deliberately.'],
+  stopseq:          ['stop sequences', 'Generation halts when any of these strings appears.', 'One per line. Finish reason will show the sequence rather than length or stop.'],
+  logprobs:         ['request logprobs', 'Ask the server for the probability distribution at each step.', 'Powers the certainty chart and the candidate inspector — but adds ~450 bytes per token and real serialisation cost. Turn it off when benchmarking throughput.'],
+  top_logprobs:     ['top_logprobs', 'How many candidate tokens to return per step.', 'Higher gives a better entropy estimate (it is truncated to these k) but costs proportionally more bytes and time.'],
+  thinkseg:         ['thinking mode', 'Force chain-of-thought on or off, or leave the model default.', 'Reasoning models default to on, which is a large token tax. Off for coding and extraction; on for genuinely algorithmic problems.'],
+  modeseg:          ['endpoint', 'native /api/chat versus OpenAI-compatible /v1/chat/completions.', 'Native returns the nanosecond engine timers and the full sampler set. /v1 gives portability but no engine timing — compare on wall tok/s there.'],
+  repeat:           ['repeat', 'Run the same request N times in a row.', 'The only honest way to compare anything. Five runs gives you the variance line in the Runs tab; a difference smaller than that spread is noise.'],
+  multiturn:        ['keep conversation', 'Append each exchange and resend the history.', 'Prompt tokens grow every turn, so prefill cost grows with them. Watch the context budget bar.'],
+  host:             ['host', 'Which Ollama server this request goes to.', 'Switchable mid-session. Every run records its host, so you can put two machines side by side in the Runs tab.'],
+  model:            ['model', 'The model to run, with size and quantization.', 'Quantization drives both memory and eval rate. A MoE model shows its full size here but only activates a fraction per token — which is why it decodes far faster than a dense model of the same size.'],
+};
+
+const helptip = document.getElementById('helptip');
+let helpHideTimer = null;
+function positionHelp(x, y){
+  const r = helptip.getBoundingClientRect();
+  helptip.style.left = Math.max(8, Math.min(window.innerWidth - r.width - 8, x + 14)) + 'px';
+  helptip.style.top  = (y - r.height - 12 < 8 ? y + 18 : y - r.height - 12) + 'px';
+}
+document.addEventListener('mouseover', e => {
+  const el = e.target.closest('[data-help]');
+  if(!el || el.closest('#stream')){ return; }
+  const h = HELP[el.dataset.help];
+  if(!h) return;
+  clearTimeout(helpHideTimer);
+  helptip.innerHTML = `<div class="ht">${esc(h[0])}</div><div class="hw">${h[1]}</div>`+
+                      (h[2] ? `<div class="hi">${h[2]}</div>` : '');
+  helptip.style.display = 'block';
+  positionHelp(e.clientX, e.clientY);
+});
+document.addEventListener('mousemove', e => {
+  if(helptip.style.display === 'block' && e.target.closest('[data-help]')) positionHelp(e.clientX, e.clientY);
+});
+document.addEventListener('mouseout', e => {
+  if(!e.target.closest('[data-help]')) return;
+  helpHideTimer = setTimeout(()=>{ helptip.style.display='none'; }, 60);
+});
+
+/* attach help keys to controls and panels without touching the markup */
+function wireHelp(){
+  const fieldFor = id => { const el=$('#'+id); return el && el.closest('.field'); };
+  for(const id of ['temperature','top_p','top_k','min_p','repeat_penalty','repeat_last_n',
+                   'presence_penalty','frequency_penalty','num_ctx','num_predict','seed',
+                   'keep_alive','stopseq','top_logprobs','repeat']){
+    const f = fieldFor(id); if(f) f.dataset.help = id;
+  }
+  const lp = $('#logprobs'); if(lp && lp.closest('.chk')) lp.closest('.chk').dataset.help = 'logprobs';
+  const mt = $('#multiturn'); if(mt && mt.closest('.chk')) mt.closest('.chk').dataset.help = 'multiturn';
+  const ts = $('#thinkseg'); if(ts && ts.closest('.field')) ts.closest('.field').dataset.help = 'thinkseg';
+  const ms = $('#modeseg'); if(ms && ms.closest('.field')) ms.closest('.field').dataset.help = 'modeseg';
+  const hp = document.querySelector('.hostpill'); if(hp) hp.dataset.help = 'host';
+  const md = $('#model'); if(md) md.dataset.help = 'model';
+  const cb = $('#ctxbar'); if(cb) cb.dataset.help = 'ctxbar';
+  for(const cid of ['c_tps','c_itl','c_hist','c_conf']){
+    const cv = $('#'+cid); if(cv) cv.dataset.help = cid;
+    const panel = cv && cv.closest('.panel'); const ph = panel && panel.querySelector('.ph');
+    if(ph) ph.dataset.help = cid;
+  }
+}
+
+/* ===================== settings persistence ===================== */
+const LS_SETTINGS = 'tracelab.settings';
+const TEXT_FIELDS = ['sys','usr','stopseq','num_ctx','num_predict','seed','keep_alive'];
+const RANGE_FIELDS = ['temperature','top_p','top_k','min_p','repeat_penalty','repeat_last_n',
+                      'presence_penalty','frequency_penalty','top_logprobs','repeat'];
+const CHECK_FIELDS = ['logprobs','multiturn'];
+
+function saveSettings(){
+  try{
+    const o = {v:1, host:S.host, model:$('#model').value, mode:S.mode,
+               heat:S.heat, thinkMode:S.thinkMode, speed:$('#speed').value};
+    for(const id of TEXT_FIELDS.concat(RANGE_FIELDS)) o[id] = $('#'+id).value;
+    for(const id of CHECK_FIELDS) o[id] = $('#'+id).checked;
+    localStorage.setItem(LS_SETTINGS, JSON.stringify(o));
+  }catch(e){ /* private window, blocked storage — settings just do not persist */ }
+}
+function loadSettings(){
+  try{ return JSON.parse(localStorage.getItem(LS_SETTINGS) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function applySettings(o){
+  if(!o || !o.v) return;
+  for(const id of TEXT_FIELDS.concat(RANGE_FIELDS))
+    if(o[id] !== undefined && $('#'+id)) $('#'+id).value = o[id];
+  for(const id of CHECK_FIELDS)
+    if(o[id] !== undefined && $('#'+id)) $('#'+id).checked = !!o[id];
+  if(o.speed && $('#speed')) $('#speed').value = o.speed;
+  const seg = (sel, val, apply) => {
+    const b = document.querySelector(`${sel} button[data-v="${val}"]`);
+    if(b){ $$(`${sel} button`).forEach(x=>x.classList.remove('on')); b.classList.add('on'); apply(val); }
+  };
+  if(o.mode !== undefined) seg('#modeseg', o.mode, v => S.mode = v);
+  if(o.heat !== undefined) seg('#heatseg', o.heat, v => S.heat = v);
+  if(o.thinkMode !== undefined) seg('#thinkseg', o.thinkMode, v => {
+    S.thinkMode = v;
+    $('#_thinkmode').textContent = v===''?'model default':(v==='1'?'forced on':'forced off');
+  });
+  // slider read-outs and character counts follow the restored values
+  SLIDERS.forEach(id => $('#'+id).dispatchEvent(new Event('input')));
+  $('#repeat').dispatchEvent(new Event('input'));
+  $('#sys').dispatchEvent(new Event('input'));
+  $('#usr').dispatchEvent(new Event('input'));
+}
+function wireAutosave(){
+  let t = null;
+  const bump = () => { clearTimeout(t); t = setTimeout(saveSettings, 300); };
+  for(const id of TEXT_FIELDS.concat(RANGE_FIELDS).concat(CHECK_FIELDS).concat(['model','speed'])){
+    const el = $('#'+id); if(el){ el.addEventListener('input', bump); el.addEventListener('change', bump); }
+  }
+  for(const sel of ['#modeseg','#heatseg','#thinkseg'])
+    $$(`${sel} button`).forEach(b => b.addEventListener('click', bump));
+  window.addEventListener('beforeunload', saveSettings);
+}
+$('#resetsettings') && $('#resetsettings').addEventListener('click', ()=>{
+  try{ localStorage.removeItem(LS_SETTINGS); }catch(e){}
+  location.reload();
+});
+
 /* ===================== bootstrap ===================== */
 async function refreshHost(){
   $('#dot').className = 'dot busy';
@@ -1355,10 +1588,20 @@ async function refreshHost(){
 }
 
 async function bootstrap(){
-  buildTiles(); renderAll();
+  buildTiles(); renderAll(); wireHelp();
+  const saved = loadSettings();
+  applySettings(saved);
   await loadHosts();
+  if(saved.host && S.hosts.some(h => h.url === saved.host)){ S.host = saved.host; renderHostSelect(); }
   await refreshHost();
+  // the model list only exists after the host answers, so restore the choice here
+  if(saved.model && Array.from($('#model').options).some(o => o.value === saved.model)){
+    $('#model').value = saved.model;
+    S.show = null;
+  }
   loadRuns();
+  wireAutosave();
+  saveSettings();
 }
 bootstrap();
 </script>
