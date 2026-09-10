@@ -114,7 +114,7 @@ class H(BaseHTTPRequestHandler):
             fin = {"model": body.get("model"), "message": {"role": "assistant", "content": ""},
                    "done": True, "done_reason": "stop",
                    "total_duration": int(2.9e9), "load_duration": int(0.42e9),
-                   "prompt_eval_count": 34, "prompt_eval_duration": int(0.21e9),
+                   "prompt_eval_count": 34, "prompt_eval_duration": (0 if body.get("model","").endswith("-mlx") else int(0.21e9)),
                    "eval_count": n, "eval_duration": int(2.1e9)}
             self.wfile.write(json.dumps(fin).encode() + b"\n")
         self.wfile.flush()

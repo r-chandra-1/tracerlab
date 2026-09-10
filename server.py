@@ -473,6 +473,21 @@ def pct(sorted_vals, p):
     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
 
 
+def _timer_broken(count, ns):
+    """Some runners (notably Ollama's MLX engine) report a near-zero duration.
+
+    Dividing by it yields nonsense like 758,000 tok/s, which is worse than no
+    number at all when you are using these figures to choose a runtime.
+    """
+    return bool(count and count > 1 and (not ns or ns < 1_000_000))   # < 1ms
+
+
+def _rate(count, ns):
+    if not count or not ns or _timer_broken(count, ns):
+        return None
+    return count / (ns / 1e9)
+
+
 def summarise(run_id, mode, payload, marks, steps, frames,
               final_meta, total_bytes, text, think_text, err, tgt):
     dts = sorted([t["dt"] for t in steps if t.get("dt") is not None])
@@ -530,10 +545,12 @@ def summarise(run_id, mode, payload, marks, steps, frames,
             "load_duration_ms": load_ns / 1e6 if load_ns else None,
             "prompt_eval_count": pe_n,
             "prompt_eval_duration_ms": pe_ns / 1e6 if pe_ns else None,
-            "prompt_eval_rate": (pe_n / (pe_ns / 1e9)) if (pe_n and pe_ns) else None,
+            "prompt_eval_rate": _rate(pe_n, pe_ns),
+            "prompt_eval_timer_broken": _timer_broken(pe_n, pe_ns),
             "eval_count": ev_n,
             "eval_duration_ms": ev_ns / 1e6 if ev_ns else None,
-            "eval_rate": (ev_n / (ev_ns / 1e9)) if (ev_n and ev_ns) else None,
+            "eval_rate": _rate(ev_n, ev_ns),
+            "eval_timer_broken": _timer_broken(ev_n, ev_ns),
             "done_reason": final_meta.get("done_reason"),
             "context_len": final_meta.get("context_len"),
             "total_tokens": final_meta.get("total_tokens"),

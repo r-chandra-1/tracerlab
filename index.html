@@ -748,9 +748,11 @@ function liveMetrics(){
 function finalMetrics(f){
   const e = f.engine||{}, w = f.wall||{}, dv = f.derived||{};
   setTile('evrate', e.eval_rate?`${nf(e.eval_rate,1)}<small>/s</small>`:'—',
-          e.eval_duration_ms?`decode ${ms(e.eval_duration_ms)}`:'engine metric n/a');
+          e.eval_timer_broken ? 'engine reported ~0ms — unusable'
+            : (e.eval_duration_ms?`decode ${ms(e.eval_duration_ms)}`:'engine metric n/a'));
   setTile('perate', e.prompt_eval_rate?`${nf(e.prompt_eval_rate,0)}<small>/s</small>`:'—',
-          e.prompt_eval_duration_ms?`prefill ${ms(e.prompt_eval_duration_ms)}`:'');
+          e.prompt_eval_timer_broken ? 'engine reported ~0ms — unusable'
+            : (e.prompt_eval_duration_ms?`prefill ${ms(e.prompt_eval_duration_ms)}`:''));
   setTile('ptok', ni(e.prompt_eval_count));
   setTile('load', e.load_duration_ms!=null?ms(e.load_duration_ms):'—',
           e.load_duration_ms>500?'cold start':'warm');
