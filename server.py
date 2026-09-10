@@ -13,12 +13,23 @@ Usage:
     python3 server.py --port 8777 --host 127.0.0.1
     OLLAMA_HOST=http://ollama.example.com:11434 python3 server.py
 
-To avoid retyping your host, drop a tracer.local.json next to this file:
+Several hosts can be configured and switched from the UI at runtime — useful
+for comparing, say, a laptop against a GPU box. Drop a tracer.local.json next
+to this file:
 
-    {"ollama": "http://ollama.example.com:11434", "port": 8777}
+    {
+      "port": 8777,
+      "hosts": [
+        {"label": "laptop",  "url": "http://localhost:11434"},
+        {"label": "gpu box", "url": "http://ollama.example.com:11434"}
+      ]
+    }
 
-That file is gitignored, so your internal hostnames never reach the repo.
-Resolution order: --ollama > OLLAMA_HOST > tracer.local.json > localhost.
+The single-host form still works: {"ollama": "http://ollama.example.com:11434"}.
+localhost is always offered even when it is not listed. That file is gitignored,
+so your internal hostnames never reach the repo.
+Resolution order for the default: --ollama > OLLAMA_HOST > tracer.local.json
+> localhost.
 
 Stdlib only. No pip installs.
 """
@@ -42,7 +53,8 @@ RUNS_DIR = os.path.join(HERE, "runs")
 
 DEFAULT_OLLAMA = "http://localhost:11434"
 LOCAL_CONFIG = "tracer.local.json"
-OLLAMA = {"scheme": "http", "host": "localhost", "port": 11434}
+TARGETS = []            # [{"label": str, "url": str}] offered in the UI
+DEFAULT_URL = DEFAULT_OLLAMA
 RUN_INDEX = []          # newest-last, in-memory summaries
 RUN_LOCK = threading.Lock()
 CANCEL = set()          # run ids the client asked to stop
@@ -66,30 +78,30 @@ def local_config():
         return {}
 
 
-def set_ollama(url):
-    """Accept anything from 'ollama.example.com' to 'http://ollama.example.com:11434/v1/chat/completions'."""
-    u = (url or "").strip()
-    if not u:
-        return
+def parse_target(url):
+    """Accept 'box', 'box:11434' or a full URL (path and all) and normalise it.
+
+    Returns a self-contained dict; nothing global is mutated, so concurrent
+    requests to different hosts cannot race each other.
+    """
+    u = (url or "").strip() or DEFAULT_URL
     if "://" not in u:
         u = "http://" + u
     p = urllib.parse.urlparse(u)
-    OLLAMA["scheme"] = p.scheme or "http"
-    OLLAMA["host"] = p.hostname or "localhost"
-    OLLAMA["port"] = p.port or (443 if p.scheme == "https" else 11434)
+    scheme = p.scheme or "http"
+    host = p.hostname or "localhost"
+    port = p.port or (443 if scheme == "https" else 11434)
+    return {"scheme": scheme, "host": host, "port": port,
+            "url": "%s://%s:%d" % (scheme, host, port)}
 
 
-def base_url():
-    return "%s://%s:%d" % (OLLAMA["scheme"], OLLAMA["host"], OLLAMA["port"])
+def new_conn(tgt, timeout=600):
+    if tgt["scheme"] == "https":
+        return http.client.HTTPSConnection(tgt["host"], tgt["port"], timeout=timeout)
+    return http.client.HTTPConnection(tgt["host"], tgt["port"], timeout=timeout)
 
 
-def new_conn(timeout=600):
-    if OLLAMA["scheme"] == "https":
-        return http.client.HTTPSConnection(OLLAMA["host"], OLLAMA["port"], timeout=timeout)
-    return http.client.HTTPConnection(OLLAMA["host"], OLLAMA["port"], timeout=timeout)
-
-
-def upstream_json(method, path, payload=None, timeout=30):
+def upstream_json(tgt, method, path, payload=None, timeout=30):
     """Simple non-streaming proxy call. Returns (status, obj_or_text, elapsed_ms)."""
     body = None
     headers = {"Accept": "application/json"}
@@ -97,7 +109,7 @@ def upstream_json(method, path, payload=None, timeout=30):
         body = json.dumps(payload).encode()
         headers["Content-Type"] = "application/json"
     t0 = time.perf_counter()
-    conn = new_conn(timeout)
+    conn = new_conn(tgt, timeout)
     try:
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
@@ -298,13 +310,14 @@ class Emitter:
 
 def run_trace(cfg, emit):
     run_id = cfg.get("run_id") or uuid.uuid4().hex[:12]
+    tgt = parse_target(cfg.get("host"))
     mode = cfg.get("mode", "native")
     path, payload = build_request(cfg)
     attempts = [(payload, bool(cfg.get("logprobs")))]
 
     result = None
     for attempt_i, (pl, had_lp) in enumerate(attempts):
-        result = _one_attempt(run_id, mode, path, pl, emit, cfg)
+        result = _one_attempt(run_id, mode, path, pl, emit, cfg, tgt)
         if result.get("retry_without_logprobs") and had_lp:
             emit({"t": "notice", "level": "warn",
                   "msg": "Server rejected logprobs on this endpoint - retrying without them."})
@@ -317,12 +330,12 @@ def run_trace(cfg, emit):
     return result
 
 
-def _one_attempt(run_id, mode, path, payload, emit, cfg):
+def _one_attempt(run_id, mode, path, payload, emit, cfg, tgt):
     body = json.dumps(payload).encode()
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream, application/x-ndjson"}
 
     emit({"t": "request", "run_id": run_id, "mode": mode,
-          "url": base_url() + path, "headers": headers,
+          "url": tgt["url"] + path, "host": tgt["url"], "headers": headers,
           "payload": payload, "bytes": len(body)})
 
     T0 = time.perf_counter()
@@ -330,7 +343,7 @@ def _one_attempt(run_id, mode, path, payload, emit, cfg):
     def ms():
         return (time.perf_counter() - T0) * 1000.0
 
-    conn = new_conn(timeout=cfg.get("timeout") or 900)
+    conn = new_conn(tgt, timeout=cfg.get("timeout") or 900)
     marks = {}
     frames = []
     tokens = []
@@ -347,12 +360,12 @@ def _one_attempt(run_id, mode, path, payload, emit, cfg):
             conn.connect()
         except socket.gaierror as e:
             emit({"t": "error", "fatal": True,
-                  "msg": "DNS failed for '%s' - is the hostname reachable from this Mac? (%s)"
-                         % (OLLAMA["host"], e)})
+                  "msg": "DNS failed for '%s' - is that hostname reachable from the machine "
+                         "running server.py? (%s)" % (tgt["host"], e)})
             return {"error": "dns"}
         except OSError as e:
             emit({"t": "error", "fatal": True,
-                  "msg": "Cannot connect to %s - %s" % (base_url(), e)})
+                  "msg": "Cannot connect to %s - %s" % (tgt["url"], e)})
             return {"error": "connect"}
         marks["connect_ms"] = ms()
         try:
@@ -449,7 +462,7 @@ def _one_attempt(run_id, mode, path, payload, emit, cfg):
 
     summary = summarise(run_id, mode, payload, marks, tokens, thinking_tokens,
                         frames, final_meta, total_bytes, "".join(text_buf),
-                        "".join(think_buf), err)
+                        "".join(think_buf), err, tgt)
     emit({"t": "final", **summary})
     persist(summary, tokens, frames)
     return summary
@@ -464,7 +477,7 @@ def pct(sorted_vals, p):
 
 
 def summarise(run_id, mode, payload, marks, tokens, thinking, frames,
-              final_meta, total_bytes, text, think_text, err):
+              final_meta, total_bytes, text, think_text, err, tgt):
     dts = sorted([t["dt"] for t in tokens if t.get("dt") is not None])
     end = marks.get("end_ms") or 0.0
     ttft = marks.get("ttft_ms")
@@ -484,6 +497,7 @@ def summarise(run_id, mode, payload, marks, tokens, thinking, frames,
         "run_id": run_id,
         "ts": time.time(),
         "mode": mode,
+        "host": tgt["url"],
         "model": payload.get("model"),
         "error": err,
         "wall": {
@@ -551,7 +565,7 @@ def persist(summary, tokens, frames):
             json.dump({"summary": summary, "tokens": tokens, "frames": frames}, f)
         with RUN_LOCK:
             RUN_INDEX.append({k: summary[k] for k in
-                              ("run_id", "ts", "model", "mode", "counts",
+                              ("run_id", "ts", "model", "mode", "host", "counts",
                                "engine", "wall", "itl", "derived")})
             del RUN_INDEX[:-200]
     except Exception:
@@ -619,25 +633,30 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         if p in ("/", "/index.html"):
             return self._file("index.html", "text/html; charset=utf-8")
+        q = urllib.parse.parse_qs(u.query)
+        tgt = parse_target((q.get("host") or [None])[0])
+        if p == "/api/hosts":
+            return self._json({"hosts": TARGETS, "default": DEFAULT_URL})
         if p == "/api/config":
-            return self._json({"base": base_url(), "host": OLLAMA["host"],
-                               "port": OLLAMA["port"]})
+            return self._json({"base": tgt["url"], "host": tgt["host"],
+                               "port": tgt["port"], "hosts": TARGETS,
+                               "default": DEFAULT_URL})
         if p == "/api/health":
             try:
-                st, ver, ms = upstream_json("GET", "/api/version", timeout=6)
+                st, ver, ms = upstream_json(tgt, "GET", "/api/version", timeout=6)
                 return self._json({"ok": st == 200, "status": st, "version": ver,
-                                   "rtt_ms": ms, "base": base_url()})
+                                   "rtt_ms": ms, "base": tgt["url"]})
             except Exception as e:
-                return self._json({"ok": False, "error": str(e), "base": base_url()})
+                return self._json({"ok": False, "error": str(e), "base": tgt["url"]})
         if p == "/api/models":
             try:
-                st, obj, ms = upstream_json("GET", "/api/tags", timeout=15)
+                st, obj, ms = upstream_json(tgt, "GET", "/api/tags", timeout=15)
                 return self._json({"ok": st == 200, "rtt_ms": ms, "data": obj})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)})
         if p == "/api/ps":
             try:
-                st, obj, ms = upstream_json("GET", "/api/ps", timeout=10)
+                st, obj, ms = upstream_json(tgt, "GET", "/api/ps", timeout=10)
                 return self._json({"ok": st == 200, "rtt_ms": ms, "data": obj})
             except Exception as e:
                 return self._json({"ok": False, "error": str(e)})
@@ -659,7 +678,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/show":
             body = self._body()
             try:
-                st, obj, ms = upstream_json("POST", "/api/show",
+                st, obj, ms = upstream_json(parse_target(body.get("host")), "POST", "/api/show",
                                             {"model": body.get("model"), "verbose": False},
                                             timeout=30)
                 return self._json({"ok": st == 200, "rtt_ms": ms, "data": obj})
@@ -674,7 +693,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/unload":
             body = self._body()
             try:
-                st, obj, ms = upstream_json("POST", "/api/chat",
+                st, obj, ms = upstream_json(parse_target(body.get("host")), "POST", "/api/chat",
                                             {"model": body.get("model"), "messages": [],
                                              "keep_alive": 0}, timeout=30)
                 return self._json({"ok": st == 200, "data": obj})
@@ -694,7 +713,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         emit = Emitter(self.wfile).send
-        emit({"t": "hello", "run_id": cfg.get("run_id"), "base": base_url()})
+        emit({"t": "hello", "run_id": cfg.get("run_id"),
+              "base": parse_target(cfg.get("host"))["url"]})
         try:
             run_trace(cfg, emit)
         except Exception as e:
@@ -706,26 +726,60 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
 
+def build_targets(cli_url, cfg):
+    """Assemble the host list offered in the UI, newest intent first.
+
+    localhost is always present: it is the common case (Ollama on this machine)
+    and costs nothing when unused.
+    """
+    out, seen = [], set()
+
+    def add(label, url):
+        if not url:
+            return
+        u = parse_target(url)["url"]
+        if u in seen:
+            return
+        seen.add(u)
+        out.append({"label": label, "url": u})
+
+    explicit = cli_url or os.environ.get("OLLAMA_HOST")
+    add("default", explicit)
+    for h in (cfg.get("hosts") or []):
+        if isinstance(h, dict):
+            add(h.get("label") or parse_target(h.get("url"))["host"], h.get("url"))
+        elif isinstance(h, str):
+            add(parse_target(h)["host"], h)
+    add("configured", cfg.get("ollama"))
+    add("localhost", DEFAULT_OLLAMA)
+
+    default_url = out[0]["url"] if out else DEFAULT_OLLAMA
+    return out, default_url
+
+
 def main():
     ap = argparse.ArgumentParser(description="Ollama Trace Lab")
     cfg = local_config()
     ap.add_argument("--ollama", default=None,
-                    help="Ollama base URL (default: $OLLAMA_HOST, else tracer.local.json, "
+                    help="default Ollama base URL (also: $OLLAMA_HOST, tracer.local.json, "
                          "else %s)" % DEFAULT_OLLAMA)
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
-    a.ollama = a.ollama or os.environ.get("OLLAMA_HOST") or cfg.get("ollama") or DEFAULT_OLLAMA
     if a.port is None:
         a.port = int(os.environ.get("TRACER_PORT") or cfg.get("port") or 8777)
-    set_ollama(a.ollama)
+
+    global TARGETS, DEFAULT_URL
+    TARGETS, DEFAULT_URL = build_targets(a.ollama, cfg)
     os.makedirs(RUNS_DIR, exist_ok=True)
 
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     srv.daemon_threads = True
     url = "http://%s:%d/" % ("localhost" if a.host in ("127.0.0.1", "0.0.0.0") else a.host, a.port)
     print("\n  Ollama Trace Lab")
-    print("  upstream : %s" % base_url())
+    for t in TARGETS:
+        print("  host     : %-9s %s%s" % (t["label"], t["url"],
+                                          "   (default)" if t["url"] == DEFAULT_URL else ""))
     print("  ui       : %s" % url)
     print("  runs     : %s" % RUNS_DIR)
     print("\n  Ctrl-C to stop.\n")

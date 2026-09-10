@@ -94,6 +94,10 @@ main{flex:1;display:grid;grid-template-columns:300px minmax(0,1fr) 380px;gap:8px
 .caret{display:inline-block;width:7px;height:14px;background:var(--cyan);vertical-align:-2px;animation:blink .9s steps(1) infinite}
 @keyframes blink{50%{opacity:0}}
 
+.hostpill{padding:2px 4px 2px 9px;display:flex;align-items:center}
+.hostpill select{border:0;background:none;padding:4px 4px;min-width:140px;font:11px/1 var(--mono);color:var(--fg)}
+.hostpill select:focus{box-shadow:none}
+
 .legendbar{display:flex;align-items:center;gap:8px;font:10px/1 var(--mono);color:var(--fg3)}
 .grad{height:9px;width:110px;border-radius:3px;border:1px solid var(--line2)}
 
@@ -174,7 +178,8 @@ pre{margin:0;font:10.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-a
 
 <header>
   <div class="brand">◈ OLLAMA <b>TRACE LAB</b></div>
-  <div class="pill"><span class="dot" id="dot"></span><span id="upstream">connecting…</span></div>
+  <div class="pill hostpill"><span class="dot" id="dot"></span><select id="host"><option>loading…</option></select></div>
+  <input type="text" id="hostinput" placeholder="http://localhost:11434  ⏎" style="display:none;min-width:200px">
   <div class="pill" id="verpill">v?</div>
   <select id="model" style="min-width:210px"><option>loading…</option></select>
   <button id="refresh" title="Reload model list / server state">⟳</button>
@@ -399,8 +404,74 @@ const S = {
   running:false, runId:null, mode:'native',
   tokens:[], think:[], frames:[], phases:{}, req:null, hdr:null, final:null,
   sel:null, heat:'latency', history:[], convo:[], t0:0, notes:[],
-  playTimer:null, scrubAt:null, models:[], show:null, ps:null, compare:new Set()
+  playTimer:null, scrubAt:null, models:[], show:null, ps:null, compare:new Set(),
+  host:'', hosts:[]
 };
+
+/* ===================== host selection ===================== */
+/* Every upstream call carries its target, so switching hosts mid-session is
+   safe and two hosts can be compared without restarting the server. */
+const hq = (extra) => '?host=' + encodeURIComponent(S.host || '') + (extra || '');
+const shortHost = u => String(u || '').replace(/^https?:\/\//, '').replace(/:11434$/, '');
+const LS_HOSTS = 'tracelab.hosts';
+
+function extraHosts(){
+  try{ return JSON.parse(localStorage.getItem(LS_HOSTS) || '[]'); }catch(e){ return []; }
+}
+function rememberHost(url){
+  try{
+    const list = extraHosts();
+    if(!list.includes(url)){ list.push(url); localStorage.setItem(LS_HOSTS, JSON.stringify(list)); }
+  }catch(e){}
+}
+function renderHostSelect(){
+  const sel = $('#host');
+  sel.innerHTML = S.hosts.map(h => {
+      const sh = shortHost(h.url);
+      const txt = (h.label === sh) ? sh : `${h.label} · ${sh}`;
+      return `<option value="${esc(h.url)}">${esc(txt)}</option>`;
+    }).join('')
+    + '<option value="__add">＋ add host…</option>';
+  sel.value = S.host;
+}
+async function loadHosts(){
+  let list = [];
+  try{
+    const r = await (await fetch('/api/hosts')).json();
+    list = r.hosts || [];
+    S.host = r.default || (list[0] && list[0].url) || '';
+  }catch(e){}
+  for(const u of extraHosts())
+    if(!list.some(h => h.url === u)) list.push({label:'added', url:u});
+  S.hosts = list;
+  renderHostSelect();
+}
+async function switchHost(url){
+  S.host = url;
+  S.show = null;
+  renderHostSelect();
+  await refreshHost();
+}
+$('#host').addEventListener('change', e => {
+  if(e.target.value === '__add'){
+    e.target.value = S.host;
+    const inp = $('#hostinput');
+    inp.style.display = ''; inp.value = ''; inp.focus();
+    return;
+  }
+  switchHost(e.target.value);
+});
+$('#hostinput').addEventListener('keydown', async e => {
+  if(e.key === 'Escape'){ e.target.style.display = 'none'; return; }
+  if(e.key !== 'Enter') return;
+  const url = e.target.value.trim();
+  if(!url) { e.target.style.display = 'none'; return; }
+  const norm = url.includes('://') ? url : 'http://' + url;
+  if(!S.hosts.some(h => h.url === norm)) S.hosts.push({label:'added', url:norm});
+  rememberHost(norm);
+  e.target.style.display = 'none';
+  await switchHost(norm);
+});
 
 /* ===================== number formatting ===================== */
 const nf = (v,d=1)=> (v===null||v===undefined||!isFinite(v)) ? '—' : (+v).toFixed(d);
@@ -973,7 +1044,7 @@ async function loadModelInfo(){
   $('#showbox').innerHTML = '<div class="note">loading /api/show…</div>';
   try{
     const r = await (await fetch('/api/show',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:m})})).json();
+      body:JSON.stringify({model:m, host:S.host})})).json();
     S.show = r.data;
     if(!r.ok){ $('#showbox').innerHTML = `<div class="err">${esc(JSON.stringify(r).slice(0,400))}</div>`; return; }
     const d = r.data||{}, det = d.details||{}, info = d.model_info||{};
@@ -998,7 +1069,7 @@ async function loadModelInfo(){
 }
 async function loadPs(){
   try{
-    const r = await (await fetch('/api/ps')).json();
+    const r = await (await fetch('/api/ps' + hq())).json();
     S.ps = r.data;
     const list = (r.data&&r.data.models)||[];
     if(!list.length){ $('#psbox').innerHTML = '<div class="note">RUNNING MODELS · none loaded</div>'; return; }
@@ -1016,6 +1087,7 @@ async function loadPs(){
 
 /* ===================== runs / compare ===================== */
 const CMP = [
+  ['host', r=>r.host, v=>shortHost(v), null],
   ['ttft', r=>r.wall?.ttft_ms, v=>ms(v), 'lo'],
   ['tok/s wall', r=>r.derived?.wall_tok_per_s, v=>nf(v,1), 'hi'],
   ['eval rate', r=>r.engine?.eval_rate, v=>nf(v,1), 'hi'],
@@ -1038,12 +1110,13 @@ async function loadRuns(){
 }
 function renderRuns(){
   if(!S.history.length){ $('#runs').innerHTML='<div class="note">no runs yet</div>'; return; }
-  let html = '<div class="note">RUN HISTORY — tick 2+ to compare</div><table><tr><th></th><th>when</th><th>model</th><th>tok/s</th><th>ttft</th></tr>';
+  let html = '<div class="note">RUN HISTORY — tick 2+ to compare</div><table><tr><th></th><th>when</th><th>host</th><th>model</th><th>tok/s</th><th>ttft</th></tr>';
   for(const r of S.history.slice(0,25)){
     const ck = S.compare.has(r.run_id)?'checked':'';
     html += `<tr><td><input type="checkbox" class="cmp" data-id="${r.run_id}" ${ck}></td>`+
       `<td class="v">${new Date(r.ts*1000).toLocaleTimeString()}</td>`+
-      `<td class="v" style="max-width:90px;overflow:hidden;text-overflow:ellipsis">${esc(r.model||'')}</td>`+
+      `<td class="v" style="max-width:74px;overflow:hidden;text-overflow:ellipsis">${esc(shortHost(r.host))}</td>`+
+      `<td class="v" style="max-width:80px;overflow:hidden;text-overflow:ellipsis">${esc(r.model||'')}</td>`+
       `<td class="v">${nf(r.derived?.wall_tok_per_s,1)}</td>`+
       `<td class="v">${ms(r.wall?.ttft_ms)}</td></tr>`;
   }
@@ -1105,11 +1178,11 @@ $$('#heatseg button').forEach(b=>b.addEventListener('click',()=>{
 $('#sys').addEventListener('input',e=>$('#syscount').textContent=e.target.value.length+'c ≈'+Math.ceil(e.target.value.length/4)+'t');
 $('#usr').addEventListener('input',e=>$('#usrcount').textContent=e.target.value.length+'c ≈'+Math.ceil(e.target.value.length/4)+'t');
 $('#model').addEventListener('change',()=>{ S.show=null; loadModelInfo(); });
-$('#refresh').addEventListener('click',()=>{ bootstrap(); loadPs(); });
+$('#refresh').addEventListener('click',()=>{ refreshHost(); });
 $('#clear').addEventListener('click',()=>{ resetRun(); S.convo=[]; renderAll(); });
 $('#unload').addEventListener('click', async ()=>{
   await fetch('/api/unload',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({model:$('#model').value})});
+    body:JSON.stringify({model:$('#model').value, host:S.host})});
   loadPs();
 });
 window.addEventListener('keydown',e=>{
@@ -1166,7 +1239,7 @@ async function doRun(k,total){
   $('#run').disabled=true; $('#stopbtn').disabled=false;
   $('#metricnote').innerHTML = total>1?`<span class="badge">run ${k+1}/${total}</span>`:'';
   const cfg = {
-    run_id:S.runId, mode:S.mode, model:$('#model').value,
+    run_id:S.runId, host:S.host, mode:S.mode, model:$('#model').value,
     messages:buildMessages(), options:collectOptions(),
     logprobs:$('#logprobs').checked, top_logprobs:+$('#top_logprobs').value,
     keep_alive:$('#keep_alive').value || undefined,
@@ -1228,27 +1301,34 @@ function handleEvent(ev){
 }
 
 /* ===================== bootstrap ===================== */
-async function bootstrap(){
-  buildTiles(); renderAll();
+async function refreshHost(){
+  $('#dot').className = 'dot busy';
+  $('#verpill').textContent = 'checking…';
+  $('#model').innerHTML = '<option>loading…</option>';
   try{
-    const cfg = await (await fetch('/api/config')).json();
-    $('#upstream').textContent = cfg.base;
-  }catch(e){}
-  try{
-    const h = await (await fetch('/api/health')).json();
+    const h = await (await fetch('/api/health' + hq())).json();
     $('#dot').className = 'dot '+(h.ok?'ok':'bad');
     $('#verpill').textContent = h.ok ? ('ollama '+(h.version?.version||'?')+' · '+nf(h.rtt_ms,0)+'ms') : 'unreachable';
-    if(!h.ok) $('#metricnote').innerHTML = `<span class="err">Cannot reach upstream: ${esc(h.error||JSON.stringify(h.status))}</span>`;
-  }catch(e){ $('#dot').className='dot bad'; }
+    $('#metricnote').innerHTML = h.ok ? ''
+      : `<span class="err">Cannot reach ${esc(shortHost(S.host))}: ${esc(h.error||JSON.stringify(h.status))}</span>`;
+  }catch(e){ $('#dot').className='dot bad'; $('#verpill').textContent='unreachable'; }
   try{
-    const r = await (await fetch('/api/models')).json();
+    const r = await (await fetch('/api/models' + hq())).json();
     const list = (r.data&&r.data.models)||[];
     S.models = list;
     $('#model').innerHTML = list.length
       ? list.map(m=>`<option value="${esc(m.name||m.model)}">${esc(m.name||m.model)} · ${bytes(m.size)} · ${esc(m.details?.parameter_size||'')} ${esc(m.details?.quantization_level||'')}</option>`).join('')
-      : '<option value="">no models found</option>';
+      : '<option value="">no models on this host</option>';
   }catch(e){ $('#model').innerHTML='<option value="">error loading models</option>'; }
-  loadPs(); loadRuns();
+  loadPs();
+  if($('#tab-model').classList.contains('on')) loadModelInfo();
+}
+
+async function bootstrap(){
+  buildTiles(); renderAll();
+  await loadHosts();
+  await refreshHost();
+  loadRuns();
 }
 bootstrap();
 </script>

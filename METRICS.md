@@ -118,6 +118,7 @@ From `/api/show` — static facts about the loaded model.
 
 | Metric | What it's useful for |
 |---|---|
+| **host** | Which Ollama host the run went to — recorded per run, so a laptop and a GPU box can be compared in one table |
 | **run history** | Every run persisted to `runs/*.json` with full token and frame detail |
 | **A/B compare** | Side-by-side table with the best value per metric highlighted — the honest way to test a parameter change |
 | **tok/s variance (mean ± sd, cv%)** | Set *Repeat* to 5–10 and read this before believing any single-run comparison. A cv above ~10% means your host is noisy and small differences are meaningless |

@@ -11,20 +11,37 @@ python3 server.py --ollama http://ollama.example.com:11434
 open http://localhost:8777
 ```
 
-Point it at your host in whichever way suits you — resolution order is
-`--ollama` > `$OLLAMA_HOST` > `tracer.local.json` > `http://localhost:11434`:
+With no arguments it targets `http://localhost:11434` — Ollama on this machine.
 
-```bash
-python3 server.py --ollama http://ollama.example.com:11434 --port 8777
-OLLAMA_HOST=http://ollama.example.com:11434 python3 server.py
-```
+## Several hosts
 
-Or write it once into `tracer.local.json` beside `server.py` — that file is
-gitignored, so a private hostname never reaches the repo:
+The host is a dropdown in the header, switchable at any time without
+restarting: pick one, and the model list, `/api/ps`, `/api/show` and the next
+trace all follow it. `localhost` is always offered. Configure the rest once in
+`tracer.local.json` beside `server.py` — gitignored, so private hostnames never
+reach the repo:
 
 ```json
-{"ollama": "http://ollama.example.com:11434", "port": 8777}
+{
+  "port": 8777,
+  "hosts": [
+    {"label": "laptop",  "url": "http://localhost:11434"},
+    {"label": "gpu box", "url": "http://ollama.example.com:11434"}
+  ]
+}
 ```
+
+`＋ add host…` in the dropdown takes an ad-hoc URL and remembers it in that
+browser. The default host also comes from `--ollama` or `$OLLAMA_HOST`, and the
+single-host form `{"ollama": "http://…"}` still works.
+
+Every run records the host it ran against, so the Runs tab can put two machines
+side by side in one A/B table — same prompt, same seed, one row per metric.
+That is the honest way to see what an M-series laptop does against a discrete
+GPU: expect the laptop to hold its own on **eval rate** for small quantized
+models (unified memory has real bandwidth) while losing on **prompt eval rate**,
+which is compute-bound. Set *Repeat* to 5 first — a single run of each proves
+nothing when run-to-run variance is often 5–10%.
 
 Python 3.8+ stdlib only — no pip installs, no internet needed.
 
@@ -114,8 +131,10 @@ Two things are gitignored by default and should stay that way: `runs/` and
 
 ## If something is off
 
-- **"Cannot reach upstream"** — check `curl http://<your-host>:11434/api/version` from
-  the same machine. The tracer resolves the hostname from wherever `server.py` runs.
+- **"Cannot reach …"** — check `curl http://<that-host>:11434/api/version` from the
+  machine running `server.py`; it resolves hostnames from there, not from your browser.
+  A remote Ollama also has to be listening beyond loopback (`OLLAMA_HOST=0.0.0.0`
+  on that machine) — the default binds to 127.0.0.1 and is unreachable from outside.
 - **No candidate bars** — the model or Ollama build isn't returning logprobs; see above.
 - **Load time is huge on the first run** — that's a cold model load; run again to see
   warm numbers, or use the "Unload model from VRAM" button to force a cold start.
