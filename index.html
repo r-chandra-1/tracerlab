@@ -90,6 +90,7 @@ main{flex:1;display:grid;grid-template-columns:300px minmax(0,1fr) 380px;gap:8px
 .tk:hover{outline:1px solid #fff8}
 .tk.sel{outline:2px solid var(--amber);outline-offset:0}
 .tk.nl::after{content:"\21B5";opacity:.3;font-size:10px}
+.tk.think{opacity:.66;font-style:italic;box-shadow:inset 0 -2px 0 var(--violet)}
 #thinking{font:12px/1.7 var(--mono);white-space:pre-wrap;color:#b39ddb;opacity:.85;border-left:2px solid var(--violet);padding-left:8px}
 .caret{display:inline-block;width:7px;height:14px;background:var(--cyan);vertical-align:-2px;animation:blink .9s steps(1) infinite}
 @keyframes blink{50%{opacity:0}}
@@ -305,6 +306,7 @@ pre{margin:0;font:10.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-a
       </div>
       <div class="pb tight legendbar">
         <span id="heatlo">fast</span><div class="grad" id="grad"></div><span id="heathi">slow</span>
+        <span style="opacity:.8">· <i>italic</i> = thinking</span>
         <span class="spacer" style="flex:1"></span>
         <span id="streamstat"></span>
       </div>
@@ -668,7 +670,8 @@ const TILE_DEFS = [
   {id:'tps',   lab:'tok/s (wall)',    cls:'hi', spark:true},
   {id:'evrate',lab:'eval rate',       cls:''},
   {id:'perate',lab:'prompt eval rate',cls:''},
-  {id:'ntok',  lab:'output tokens',   cls:''},
+  {id:'ntok',  lab:'content tokens',  cls:''},
+  {id:'think', lab:'thinking tokens', cls:''},
   {id:'ptok',  lab:'prompt tokens',   cls:''},
   {id:'load',  lab:'model load',      cls:'warn'},
   {id:'total', lab:'total duration',  cls:''},
@@ -699,15 +702,20 @@ function setTile(id,val,sub){
 let tpsHistory=[];
 function liveMetrics(){
   const T = S.tokens, n = T.length;
+  const nThink = T.reduce((a,t)=>a+(t.kind==='thinking'?1:0),0);
+  const nContent = n - nThink;
   const now = T.length ? T[n-1].at : 0;
   const ttft = S.phases.first_token;
   const gen = (ttft!=null && now>ttft) ? now-ttft : null;
   const tps = (gen && n>1) ? (n-1)/(gen/1000) : null;
 
   setTile('ttft', ttft==null?'—':`${nf(ttft,0)}<small>ms</small>`,
-          S.phases.first_byte!=null?`first byte ${nf(S.phases.first_byte,0)}ms`:'');
-  setTile('tps', tps==null?'—':`${nf(tps,1)}<small>/s</small>`, n?`${n} tok in ${ms(gen)}`:'');
-  setTile('ntok', ni(n), S.final?.engine?.eval_count?`engine: ${S.final.engine.eval_count}`:'');
+          S.phases.first_content!=null && nThink
+            ? `content at ${ms(S.phases.first_content)}`
+            : (S.phases.first_byte!=null?`first byte ${nf(S.phases.first_byte,0)}ms`:''));
+  setTile('tps', tps==null?'—':`${nf(tps,1)}<small>/s</small>`, n?`${n} steps in ${ms(gen)}`:'');
+  setTile('ntok', ni(nContent), S.final?.engine?.eval_count?`engine: ${S.final.engine.eval_count}`:'');
+  setTile('think', ni(nThink), nThink?'reasoning, before the answer':'');
   setTile('frames', ni(S.frames.length));
   const wb = S.frames.reduce((a,f)=>a+f.bytes,0);
   setTile('wire', bytes(wb), n?`${nf(wb/n,0)} B/tok`:'');
@@ -731,9 +739,10 @@ function liveMetrics(){
   if(tps!=null){ tpsHistory.push(tps); if(tpsHistory.length>120) tpsHistory.shift();
     const sp=$('#sp-tps'); if(sp) sparkline(sp,tpsHistory,PAL.cyan); }
 
-  $('#streamstat').textContent = `${n} tokens · ${S.frames.length} frames · ${bytes(wb)}`;
+  $('#streamstat').textContent =
+    `${n} steps${nThink?` (${nThink} thinking)`:''} · ${S.frames.length} frames · ${bytes(wb)}`;
   $('#livestat').innerHTML = S.running
-    ? `<span class="dot busy"></span>streaming · ${n} tok · ${tps?nf(tps,1)+' t/s':''}`
+    ? `<span class="dot busy"></span>${nThink&&!nContent?'thinking':'streaming'} · ${n} tok · ${tps?nf(tps,1)+' t/s':''}`
     : (n? `<span class="dot ok"></span>done · ${n} tok` : 'idle');
 }
 function finalMetrics(f){
@@ -749,7 +758,11 @@ function finalMetrics(f){
           `wall ${ms(w.end_ms)}`);
   setTile('over', dv.overhead_ms!=null?ms(dv.overhead_ms):'—',
           dv.overhead_ms==null?'':(dv.overhead_ms<0?'engine timer > wall':'network + serialise'));
-  setTile('reason', e.done_reason||'—', f.mode);
+  const trunc = e.done_reason === 'length';
+  setTile('reason', e.done_reason||'—', trunc ? 'truncated — raise num_predict' : f.mode);
+  const rt = $('#tile-reason'); if(rt) rt.classList.toggle('warn', trunc);
+  if(trunc) $('#metricnote').innerHTML =
+    `<span class="badge" style="color:var(--amber)">hit num_predict (${e.eval_count}) — the answer was cut off</span>`;
   drawContext(e);
 }
 function drawContext(e){
@@ -775,7 +788,13 @@ function drawWaterfall(){
   seg('req → headers', w.sent??w.connect, w.headers, PAL.steel);
   seg('headers → 1st byte', w.headers, w.first_byte, PAL.amber);
   seg('1st byte → 1st tok', w.first_byte, w.first_token, PAL.violet);
-  seg('generation', w.first_token, end, PAL.cyan);
+  if(w.first_content!=null && w.first_content>w.first_token){
+    /* a reasoning model spends most of the run here, before a word is shown */
+    seg('thinking', w.first_token, w.first_content, PAL.violet);
+    seg('answer', w.first_content, end, PAL.cyan);
+  } else {
+    seg('generation', w.first_token, end, PAL.cyan);
+  }
   const max = Math.max(end, 1);
   let html = rows.map(r=>{
     const l = r.from/max*100, wd = Math.max(0.4,(r.to-r.from)/max*100);
@@ -824,7 +843,8 @@ function renderStream(){
   const frag = document.createDocumentFragment();
   for(const t of S.tokens){
     const sp = document.createElement('span');
-    sp.className = 'tk' + (t.text.includes('\n')?' nl':'') + (S.sel===t.i?' sel':'');
+    sp.className = 'tk' + (t.text.includes('\n')?' nl':'') + (S.sel===t.i?' sel':'')
+                 + (t.kind==='thinking'?' think':'');
     sp.dataset.i = t.i;
     sp.textContent = t.text;
     const c = heatColor(t);
@@ -834,10 +854,7 @@ function renderStream(){
   el.innerHTML=''; el.appendChild(frag);
   if(S.running){ const c=document.createElement('span'); c.className='caret'; el.appendChild(c);
     el.parentNode.scrollTop = el.parentNode.scrollHeight; }
-  if(S.think.length){
-    $('#thinkwrap').style.display='block';
-    $('#thinking').textContent = S.think.map(t=>t.text).join('');
-  }
+  /* thinking is rendered inline above, italic with a violet underline */
   const st = S.heat;
   $('#grad').style.background = gradCss(st==='latency'?STOPS_LAT:st==='confidence'?STOPS_CONF:st==='entropy'?STOPS_ENT:[[30,37,52],[30,37,52]]);
   $('#heatlo').textContent = st==='latency'?`${nf(S.latLo,0)}ms`:st==='confidence'?'0%':st==='entropy'?'0 bits':'';
@@ -935,6 +952,7 @@ function inspectToken(i){
   const disp = t.text.replace(/\n/g,'\\n').replace(/\t/g,'\\t').replace(/ /g,'␣');
   let html = `<table>
     <tr><td class="k">index</td><td class="v">#${t.i} of ${S.tokens.length}</td></tr>
+    <tr><td class="k">kind</td><td class="v" style="color:${t.kind==='thinking'?'var(--violet)':'var(--cyan)'}">${t.kind==='thinking'?'thinking (not shown to the user)':'content'}</td></tr>
     <tr><td class="k">text</td><td class="v" style="color:var(--cyan)">"${esc(disp)}"</td></tr>
     ${t.token_str?`<tr><td class="k">token id/str</td><td class="v">${esc(t.token_str)}</td></tr>`:''}
     <tr><td class="k">arrival</td><td class="v">${ms(cum)} after request</td></tr>
@@ -1282,7 +1300,6 @@ function handleEvent(ev){
       break;
     case 'frame': S.frames.push(ev); break;
     case 'token': S.tokens.push(ev); break;
-    case 'think': S.think.push(ev); break;
     case 'notice':
       $('#metricnote').innerHTML = `<span class="badge" style="color:var(--amber)">${esc(ev.msg)}</span>`;
       break;

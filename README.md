@@ -77,6 +77,15 @@ counts and arrival timestamps).
   Raise `top_logprobs` for a better estimate.
 - One stream frame is usually one token, but a server is free to coalesce. Where Ollama
   reports `eval_count`, that number is shown alongside the stream count.
+- **Reasoning models** emit their chain of thought in `message.thinking`, not
+  `message.content`. Those are real decode steps, so they count toward TTFT, tok/s,
+  inter-token latency and the certainty charts; they show *italic with a violet
+  underline* in the stream and get their own tile and waterfall segment. **TTFT** is
+  time to the first token of any kind, with time to first *content* underneath it —
+  on a reasoning model those can be tens of seconds apart.
+- If `finish reason` says **length**, the model hit `num_predict` and the answer was
+  truncated. On a reasoning model the chain of thought can consume the entire budget
+  before the answer starts — raise `num_predict` (or set it to `-1`).
 
 ## Endpoint modes
 

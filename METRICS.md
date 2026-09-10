@@ -86,6 +86,8 @@ Requires logprobs support in your Ollama build. Empty otherwise.
 | **bytes / token** | derived | wire bytes ÷ tokens | JSON envelope overhead per token. ~500 B/token with logprobs on, ~60 B without — worth knowing before you stream to a phone |
 | **frame timeline** | socket | Arrival offset + byte size per frame | Wire-level proof of when each chunk landed, independent of any parsing |
 | **output tokens / prompt tokens** | derived / engine | Counts | Sanity check against your prompt-size assumptions |
+| **thinking tokens** | derived | Decode steps emitted as `message.thinking` | On a reasoning model this is most of the run. A large thinking count next to a small content count — or zero content — means the budget went to reasoning; check `finish reason` for `length` |
+| **time to first content** | derived | First token that is actually shown to the user | The gap between this and TTFT is how long the model reasoned before answering |
 | **text chars** | derived | Characters generated | Char-per-token ratio, a rough tokenizer-efficiency check for your language |
 
 ## 7. Capacity and placement

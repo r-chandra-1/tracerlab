@@ -346,8 +346,7 @@ def _one_attempt(run_id, mode, path, payload, emit, cfg, tgt):
     conn = new_conn(tgt, timeout=cfg.get("timeout") or 900)
     marks = {}
     frames = []
-    tokens = []
-    thinking_tokens = []
+    steps = []            # every decode step, thinking and content alike
     total_bytes = 0
     final_meta = {}
     last_tok_t = None
@@ -414,29 +413,27 @@ def _one_attempt(run_id, mode, path, payload, emit, cfg, tgt):
             if fr is None or fr.get("sentinel"):
                 continue
 
-            if fr.get("thinking"):
-                dt = None if last_tok_t is None else at - last_tok_t
-                last_tok_t = at
-                rec = {"i": len(thinking_tokens), "at": round(at, 3),
-                       "dt": None if dt is None else round(dt, 3),
-                       "text": fr["thinking"], "kind": "thinking"}
-                thinking_tokens.append(rec)
-                think_buf.append(fr["thinking"])
-                emit({"t": "think", **rec})
-
-            if fr.get("text"):
+            # A reasoning model spends most of its decode budget in `thinking`.
+            # Those are real decode steps and must drive the timing metrics,
+            # otherwise the whole dashboard reads "-" while the model works.
+            for kind, txt in (("thinking", fr.get("thinking")), ("content", fr.get("text"))):
+                if not txt:
+                    continue
                 if marks.get("ttft_ms") is None:
                     marks["ttft_ms"] = at
                     emit({"t": "phase", "name": "first_token", "at": at})
+                if kind == "content" and marks.get("first_content_ms") is None:
+                    marks["first_content_ms"] = at
+                    emit({"t": "phase", "name": "first_content", "at": at})
                 dt = None if last_tok_t is None else at - last_tok_t
                 last_tok_t = at
-                rec = {"i": len(tokens), "at": round(at, 3),
+                rec = {"i": len(steps), "kind": kind, "at": round(at, 3),
                        "dt": None if dt is None else round(dt, 3),
-                       "text": fr["text"], "bytes": len(fr["text"].encode()),
+                       "text": txt, "bytes": len(txt.encode()),
                        "logprob": fr.get("logprob"), "top": fr.get("top"),
                        "token_str": fr.get("token_str")}
-                tokens.append(rec)
-                text_buf.append(fr["text"])
+                steps.append(rec)
+                (think_buf if kind == "thinking" else text_buf).append(txt)
                 emit({"t": "token", **rec})
 
             if fr.get("final"):
@@ -460,11 +457,11 @@ def _one_attempt(run_id, mode, path, payload, emit, cfg, tgt):
             pass
         clear_cancel(run_id)
 
-    summary = summarise(run_id, mode, payload, marks, tokens, thinking_tokens,
+    summary = summarise(run_id, mode, payload, marks, steps,
                         frames, final_meta, total_bytes, "".join(text_buf),
                         "".join(think_buf), err, tgt)
     emit({"t": "final", **summary})
-    persist(summary, tokens, frames)
+    persist(summary, steps, frames)
     return summary
 
 
@@ -476,12 +473,14 @@ def pct(sorted_vals, p):
     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
 
 
-def summarise(run_id, mode, payload, marks, tokens, thinking, frames,
+def summarise(run_id, mode, payload, marks, steps, frames,
               final_meta, total_bytes, text, think_text, err, tgt):
-    dts = sorted([t["dt"] for t in tokens if t.get("dt") is not None])
+    dts = sorted([t["dt"] for t in steps if t.get("dt") is not None])
+    content = [t for t in steps if t.get("kind") != "thinking"]
+    thinking = [t for t in steps if t.get("kind") == "thinking"]
     end = marks.get("end_ms") or 0.0
     ttft = marks.get("ttft_ms")
-    ntok = len(tokens)
+    ntok = len(steps)
     gen_ms = (end - ttft) if (ttft is not None and end > ttft) else None
 
     # native nanosecond metrics, if present
@@ -506,11 +505,13 @@ def summarise(run_id, mode, payload, marks, tokens, thinking, frames,
             "headers_ms": marks.get("headers_ms"),
             "first_byte_ms": marks.get("first_byte_ms"),
             "ttft_ms": ttft,
+            "first_content_ms": marks.get("first_content_ms"),
             "end_ms": end,
             "peer": marks.get("peer"),
         },
         "counts": {
-            "stream_tokens": ntok,
+            "decode_steps": ntok,
+            "stream_tokens": len(content),
             "thinking_tokens": len(thinking),
             "frames": len(frames),
             "wire_bytes": total_bytes,

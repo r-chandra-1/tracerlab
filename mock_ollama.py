@@ -75,6 +75,18 @@ class H(BaseHTTPRequestHandler):
         self.close_connection = True
         time.sleep(0.25)  # simulate prefill
         n = 0
+        if body.get("think") or body.get("model", "").startswith("reasoner"):
+            for tok in ["Let", " me", " check", " the", " constraint", ":", " three",
+                        " sentences", ".", " (Check)", "\n"]:
+                time.sleep(0.03)
+                n += 1
+                d = {"model": body.get("model"),
+                     "message": {"role": "assistant", "content": "", "thinking": tok},
+                     "done": False}
+                if want_lp:
+                    d["logprobs"] = [{"token": tok, "logprob": -random.random(),
+                                      "top_logprobs": logprob_set(tok, k)}]
+                self.wfile.write(json.dumps(d).encode() + b"\n"); self.wfile.flush()
         for i, tok in enumerate(TOKENS):
             time.sleep(max(0.008, random.gauss(0.032, 0.014)) + (0.14 if i in (7, 23) else 0))
             n += 1
