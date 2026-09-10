@@ -278,7 +278,8 @@ pre{margin:0;font:10.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-a
       <div class="ph"><span class="k">03</span> Context budget</div>
       <div class="pb">
         <div class="ctxbar" id="ctxbar"></div>
-        <div class="wflegend" style="margin-top:6px">
+        <div class="note" id="ctxnote" style="padding:5px 0 0"></div>
+        <div class="wflegend" style="margin-top:4px">
           <span><i style="background:var(--blue)"></i>prompt <b id="ctxp" style="color:var(--fg)">0</b></span>
           <span><i style="background:var(--cyan)"></i>output <b id="ctxo" style="color:var(--fg)">0</b></span>
           <span><i style="background:#1a2334"></i>free <b id="ctxf" style="color:var(--fg)">0</b></span>
@@ -784,8 +785,17 @@ function finalMetrics(f){
     `<span class="badge" style="color:var(--amber)">hit num_predict (${e.eval_count}) — the answer was cut off</span>`;
   drawContext(e);
 }
+/* The window the server actually loaded, which may be smaller than requested. */
+function loadedCtx(){
+  const list = (S.ps && S.ps.models) || [];
+  const want = $('#model').value;
+  const hit = list.find(x => (x.name || x.model) === want);
+  return (hit && hit.context_length) || null;
+}
 function drawContext(e){
-  const ctx = +$('#num_ctx').value || 4096;
+  const req = +$('#num_ctx').value || 4096;
+  const loaded = loadedCtx();
+  const ctx = loaded || req;
   const p = e.prompt_eval_count||0, o = e.eval_count||S.tokens.length||0;
   const free = Math.max(0, ctx-p-o);
   const tot = Math.max(1,ctx);
@@ -794,6 +804,15 @@ function drawContext(e){
     `<i style="width:${o/tot*100}%;background:var(--cyan)"></i>`+
     `<i style="width:${free/tot*100}%;background:var(--track)"></i>`;
   $('#ctxp').textContent=ni(p); $('#ctxo').textContent=ni(o); $('#ctxf').textContent=ni(free);
+  const note = $('#ctxnote');
+  if(note){
+    if(loaded && loaded !== req)
+      note.innerHTML = `<span style="color:var(--amber)">server loaded ${ni(loaded)}, you asked for ${ni(req)}</span>`;
+    else if(loaded)
+      note.textContent = `window ${ni(loaded)} (server-confirmed)`;
+    else
+      note.textContent = `window ${ni(req)} (requested; run once to confirm)`;
+  }
 }
 
 /* ===================== waterfall ===================== */
@@ -1431,7 +1450,7 @@ const HELP = {
            'Entropy spikes are genuine branch points where sampling changed the output. A small margin means temperature and top_p actually mattered there; a flat high line means the model is coasting.'],
   ctxbar: ['context budget',
            'Prompt + output tokens against num_ctx.',
-           'Shows how close you are to truncation before it silently bites. Everything past num_ctx is dropped, oldest first.'],
+           'Drawn against the window the server actually loaded, not what you asked for — if those differ the line below says so. Reserved context costs memory and load time immediately; only <b>used</b> context costs decode speed.'],
 
   /* --- parameters --- */
   temperature:      ['temperature', 'Flattens or sharpens the probability distribution before sampling.', '0 is deterministic (always the argmax). Raise for variety, lower for code and factual work. Watch the certainty chart: at low temperature chosen rank should be 1 almost everywhere.'],
