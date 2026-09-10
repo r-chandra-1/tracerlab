@@ -253,7 +253,13 @@ pre{margin:0;font:10.5px/1.5 var(--mono);white-space:pre-wrap;word-break:break-a
         <div class="chk"><input type="checkbox" id="logprobs" checked><label for="logprobs" style="margin:0;text-transform:none;letter-spacing:0;font-size:11px;color:var(--fg2)">Request logprobs</label></div>
         <div class="field"><label>top_logprobs <b id="_top_logprobs">8</b></label>
           <input type="range" id="top_logprobs" min="1" max="20" step="1" value="8"></div>
-        <div class="chk"><input type="checkbox" id="think"><label for="think" style="margin:0;text-transform:none;letter-spacing:0;font-size:11px;color:var(--fg2)">think: true (reasoning models)</label></div>
+        <div class="field"><label>thinking <b id="_thinkmode">model default</b></label>
+          <div class="seg" id="thinkseg">
+            <button data-v="" class="on">default</button>
+            <button data-v="1">on</button>
+            <button data-v="0">off</button>
+          </div>
+        </div>
         <button id="unload" style="width:100%;margin-top:4px">Unload model from VRAM</button>
       </div>
     </div>
@@ -407,7 +413,7 @@ const S = {
   tokens:[], think:[], frames:[], phases:{}, req:null, hdr:null, final:null,
   sel:null, heat:'latency', history:[], convo:[], t0:0, notes:[],
   playTimer:null, scrubAt:null, models:[], show:null, ps:null, compare:new Set(),
-  host:'', hosts:[]
+  host:'', hosts:[], thinkMode:''
 };
 
 /* ===================== host selection ===================== */
@@ -1191,6 +1197,11 @@ $('#repeat').addEventListener('input',e=>$('#repeatv').textContent=e.target.valu
 $$('#modeseg button').forEach(b=>b.addEventListener('click',()=>{
   $$('#modeseg button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); S.mode=b.dataset.v;
 }));
+$$('#thinkseg button').forEach(b=>b.addEventListener('click',()=>{
+  $$('#thinkseg button').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+  S.thinkMode = b.dataset.v;
+  $('#_thinkmode').textContent = b.dataset.v===''?'model default':(b.dataset.v==='1'?'forced on':'forced off');
+}));
 $$('#heatseg button').forEach(b=>b.addEventListener('click',()=>{
   $$('#heatseg button').forEach(x=>x.classList.remove('on')); b.classList.add('on');
   S.heat=b.dataset.v; renderStream(); drawCharts();
@@ -1263,7 +1274,7 @@ async function doRun(k,total){
     messages:buildMessages(), options:collectOptions(),
     logprobs:$('#logprobs').checked, top_logprobs:+$('#top_logprobs').value,
     keep_alive:$('#keep_alive').value || undefined,
-    think:$('#think').checked
+    think: S.thinkMode==='' ? null : S.thinkMode==='1'
   };
   try{
     const resp = await fetch('/api/trace',{method:'POST',headers:{'Content-Type':'application/json'},

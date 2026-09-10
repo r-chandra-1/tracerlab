@@ -189,8 +189,11 @@ def build_request(cfg):
         payload["options"] = opts
     if cfg.get("keep_alive") not in (None, ""):
         payload["keep_alive"] = cfg["keep_alive"]
-    if cfg.get("think"):
-        payload["think"] = True
+    # tri-state: absent = model default, True/False = explicit override.
+    # Reasoning models default to thinking on, which is a large token tax when
+    # you want code out rather than deliberation.
+    if cfg.get("think") is not None:
+        payload["think"] = bool(cfg["think"])
     if cfg.get("format"):
         payload["format"] = cfg["format"]
     if want_lp:
